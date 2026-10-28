@@ -672,7 +672,7 @@ class MechanicalPropertiesResult(PropertyResult):
 class MechanicalPropertiesCalculator(PropertyCalculator):
     """Run a uniaxial tensile protocol and analyze its pressure-strain curve.
 
-    ``strain_rate`` is engineering strain per picosecond. The selected box
+    ``strain_rate`` is engineering strain per second (s⁻¹). The selected box
     vector is extended in discrete updates every ``stretch_interval_steps``;
     between updates the simulation advances normally. An anisotropic OpenMM
     barostat measures the instantaneous pressure and optionally relaxes the
@@ -689,7 +689,7 @@ class MechanicalPropertiesCalculator(PropertyCalculator):
         self,
         axis: str = "x",
         relax_transverse_axes: bool = True,
-        strain_rate: float = 1e-4,
+        strain_rate: float = 1e8,
         stretch_interval_steps: int = 100,
         max_strain: float = 0.1,
         elastic_strain_range: tuple[float, float] = (0.0, 0.02),
@@ -705,7 +705,7 @@ class MechanicalPropertiesCalculator(PropertyCalculator):
         if axis not in self._AXIS_INDEX:
             raise ValueError("axis must be one of 'x', 'y', or 'z'")
         if not np.isfinite(strain_rate) or strain_rate <= 0:
-            raise ValueError("strain_rate must be positive finite engineering strain per ps")
+            raise ValueError("strain_rate must be positive finite engineering strain per second")
         if stretch_interval_steps < 1:
             raise ValueError("stretch_interval_steps must be >= 1")
         if not np.isfinite(max_strain) or max_strain <= 0:
@@ -749,7 +749,8 @@ class MechanicalPropertiesCalculator(PropertyCalculator):
         step_size_ps = simulation.integrator.getStepSize().value_in_unit(unit.picosecond)
         if not np.isfinite(step_size_ps) or step_size_ps <= 0:
             raise InvalidSimulationError("integrator must have a positive finite step size")
-        strain_per_interval = self.strain_rate * step_size_ps * self.stretch_interval_steps
+        strain_per_step = self.strain_rate * step_size_ps * 1e-12
+        strain_per_interval = strain_per_step * self.stretch_interval_steps
         if self.max_strain / strain_per_interval < 2:
             raise ValueError(
                 "max_strain and strain_rate produce fewer than two stretch intervals; "
@@ -789,11 +790,11 @@ class MechanicalPropertiesCalculator(PropertyCalculator):
             remaining_strain = self.max_strain - current_strain
             steps = min(
                 self.stretch_interval_steps,
-                max(1, int(np.ceil(remaining_strain / (self.strain_rate * step_size_ps)))),
+                max(1, int(np.ceil(remaining_strain / strain_per_step))),
             )
             target_strain = min(
                 self.max_strain,
-                current_strain + self.strain_rate * step_size_ps * steps,
+                current_strain + strain_per_step * steps,
             )
             stretch_factor = (1.0 + target_strain) / (1.0 + current_strain)
             box = np.asarray(
@@ -851,7 +852,7 @@ class MechanicalPropertiesCalculator(PropertyCalculator):
                 "elastic_strain_range": self.elastic_strain_range,
                 "yield_method": self.yield_method,
                 "yield_tolerance": self.yield_tolerance,
-                "strain_rate_per_ps": self.strain_rate,
+                "strain_rate_per_s": self.strain_rate,
                 "stretch_interval_steps": self.stretch_interval_steps,
                 "relax_transverse_axes": self.relax_transverse_axes,
                 "transverse_pressure_bar": self.transverse_pressure,

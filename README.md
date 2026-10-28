@@ -1,10 +1,10 @@
 # polymer-properties-calc
 
-Набросок Python-библиотеки для оценки свойств полимерных систем через уже
-созданный `openmm.app.Simulation`. Для механического расчёта нужен OpenMM 8.3+
-с поддержкой `computeCurrentPressure` у баростатов.
+A Python library for estimating properties of polymer systems from an existing
+`openmm.app.Simulation`. Mechanical calculations require OpenMM 8.3 or later
+with barostat support for `computeCurrentPressure`.
 
-## Текущий интерфейс
+## Current API
 
 ```python
 from polymer_properties_calc import (
@@ -15,7 +15,7 @@ from polymer_properties_calc import (
 calculator = MechanicalPropertiesCalculator(
     axis="x",
     relax_transverse_axes=True,
-    strain_rate=1e-4,             # engineering strain / ps
+    strain_rate=1e8,              # engineering strain / second (s^-1)
     stretch_interval_steps=100,
     max_strain=0.1,
     elastic_strain_range=(0.0, 0.02),
@@ -24,7 +24,7 @@ calculator = MechanicalPropertiesCalculator(
     transverse_pressure=1.0,      # bar
 )
 
-calculator.run(simulation)  # Растягивает ячейку и продвигает Simulation.
+calculator.run(simulation)  # Stretches the cell and advances the Simulation.
 print(calculator.raw_data.values["axial_pressure"])
 result = calculator.analyze()
 print(result.value, result.unit, result.poisson_ratio)
@@ -32,34 +32,38 @@ print(result.yield_stress, result.yield_strain)
 print(result.max_tensile_stress, result.strain_at_max_tensile_stress)
 ```
 
-### Теплоёмкость из энергетических флуктуаций
+`strain_rate` is specified in s⁻¹. The calculator converts it to the
+Simulation's time units internally. The default `1e8 s⁻¹` is equivalent to the
+previous default of `1e-4 ps⁻¹`.
+
+### Heat capacity from energy fluctuations
 
 ```python
 from polymer_properties_calc import HeatCapacityCalculator, SamplingProtocol
 
 heat_capacity = HeatCapacityCalculator(
     temperature=300,
-    ensemble="NPT",              # Cp; для Cv используйте NVT и pressure=None
+    ensemble="NPT",               # Cp; use NVT and pressure=None for Cv
     pressure=1.0,                 # bar
     protocol=SamplingProtocol(equilibration_steps=10_000, samples=2_000, steps_per_sample=20),
 )
 heat_capacity.run(simulation)
 result = heat_capacity.analyze()
-print(result.value, result.unit)  # массовая теплоёмкость, J/(g K)
+print(result.value, result.unit)  # mass-specific heat capacity, J/(g K)
 print(result.molar_heat_capacity, result.molar_unit)
 ```
 
-Для NVT используется флуктуация полной энергии, для NPT — энтальпии
-`H = U + P V`. Нулевая задержка автокорреляции энергии/энтальпии даёт дисперсию,
-из которой считается теплоёмкость; вся автокорреляционная функция и оценка
-времени корреляции сохраняются в `result.details`.
+For NVT, the calculator uses fluctuations in the total energy; for NPT, it uses
+enthalpy, `H = U + P V`. The zero-lag energy/enthalpy autocorrelation gives the
+variance used to calculate heat capacity. The full autocorrelation function and
+an estimate of the correlation time are stored in `result.details`.
 
-### Теплопроводность Green–Kubo
+### Green–Kubo thermal conductivity
 
-OpenMM не предоставляет универсальный микроскопический тепловой поток для всех
-силовых полей. Поэтому расчёт принимает функцию, которая для конкретной модели
-возвращает полный векторный тепловой ток (с конвективной и силовой/вириальной
-частями) в `kJ nm/(mol ps)`:
+OpenMM does not expose a universal microscopic heat current for every force
+field. The calculator therefore accepts a callback that returns the complete
+vector heat current for the specific model, including its convective and
+interaction/virial terms, in `kJ nm/(mol ps)`:
 
 ```python
 from polymer_properties_calc import (
@@ -67,8 +71,8 @@ from polymer_properties_calc import (
     SamplingProtocol,
 )
 
-# Реализуйте для используемого force field; это должен быть полный
-# экстенсивный тепловой ток, а не плотность тока.
+# Implement this for the force field in use. Return the extensive total heat
+# current, not a heat-current density.
 def heat_current_provider(simulation):
     return heat_current_xyz_kj_nm_per_mol_ps(simulation)
 
@@ -84,12 +88,13 @@ print(result.value, result.unit)
 print(result.details["conductivity_by_lag_W_m_K"])
 ```
 
-Интеграл Green–Kubo рассчитывается по автокорреляции теплового тока; `value`
-соответствует заданному времени отсечения, а массив зависимости результата от
-времени отсечения позволяет проверить наличие плато. Корректность зависит от
-реализации `heat_current_provider` и достаточной длины равновесной траектории.
+The Green–Kubo integral is calculated from the heat-current autocorrelation.
+`value` corresponds to the selected integration cutoff; the result as a
+function of cutoff is also available to help assess whether a plateau has been
+reached. Accuracy depends on the `heat_current_provider` implementation and on
+having a sufficiently long equilibrium trajectory.
 
-### Непрерывный расчёт Tg
+### Continuous glass-transition calculation
 
 ```python
 from polymer_properties_calc import GlassTransitionCalculator
@@ -97,9 +102,9 @@ from polymer_properties_calc import GlassTransitionCalculator
 tg = GlassTransitionCalculator(
     temperature_range=(250, 500),  # K
     rate_k_per_ns=100,
-    mode="cycles",                # cooling, heating, heating_cooling, cycles
+    mode="cycles",                 # cooling, heating, heating_cooling, cycles
     cycles=3,
-    pressure=1.0,                  # bar
+    pressure=1.0,                   # bar
     equilibration_steps=10_000,
     temperature_update_interval_steps=100,
     sample_interval_steps=10_000,
@@ -110,53 +115,53 @@ result = tg.analyze()
 print(result.value, result.unit)
 print(result.details["per_pass"])
 
-# По запросу: объёмный КТР ниже и выше Tg, в 1/K.
+# Optionally estimate volumetric CTE below and above Tg, in 1/K.
 result_with_cte = tg.analyze(include_cte=True)
 print(result_with_cte.cte_below_tg, result_with_cte.cte_above_tg)
 ```
 
-В каждом проходе температура линейно меняется с заданной скоростью; OpenMM
-получает обновлённую температуру каждые `temperature_update_interval_steps`,
-а плотность записывается каждые `sample_interval_steps`. Для нескольких
-циклов один цикл — это нагрев от минимума к максимуму и последующее охлаждение.
-В результате есть Tg для каждого прохода, а также средние оценки отдельно для
-нагревания и охлаждения. При `include_cte=True` дополнительно оценивается
-объёмный КТР по наклону плотности ниже и выше Tg: `alpha_V = -(1/rho) d(rho)/dT`.
+Temperature changes linearly at the requested rate during each pass. OpenMM's
+temperature is updated every `temperature_update_interval_steps`, and density
+is recorded every `sample_interval_steps`. In `cycles` mode, one cycle heats
+from the minimum to the maximum temperature and then cools back down. The
+result contains a Tg estimate for each pass and separate mean estimates for
+heating and cooling. With `include_cte=True`, volumetric CTE is also estimated
+from the density slopes below and above Tg:
+`alpha_V = -(1/rho) d(rho)/dT`.
 
-Механический протокол строит кривую осевого давления от деформации. Модуль
-Юнга оценивается наклоном кривой напряжение–деформация только на интервале
-`elastic_strain_range`; на том же интервале рассчитывается коэффициент Пуассона
-как минус наклон поперечной деформации от осевой. Предел текучести определяется
-по `yield_method="first_deviation"` как первое отклонение от экстраполированного
-упругого участка не менее чем на `yield_tolerance` (доля напряжения на конце
-упругого интервала). Альтернатива `yield_method="stress_drop"` отмечает
-предшествующий локальный максимум, когда напряжение после него падает на
-заданную долю. Если критерий не достигнут до `max_strain`, поля текучести будут
-`None`. Максимальное растягивающее напряжение и деформация при нём всегда
-относятся к конечной траектории расчёта. Напряжения в результате заданы в GPa.
-В OpenMM используется
-`MonteCarloAnisotropicBarostat.computeCurrentPressure`; его давление включает
-кинетическую часть и оценку вириала через конечную разность.
+The mechanical protocol records axial pressure as a function of strain. Young's
+modulus is the stress–strain slope fitted only over `elastic_strain_range`; the
+Poisson ratio is calculated over the same interval as the negative slope of
+transverse strain versus axial strain. With `yield_method="first_deviation"`,
+yield is the first deviation from the extrapolated elastic segment by at least
+`yield_tolerance` (a fraction of the stress at the end of the elastic interval).
+The alternative `yield_method="stress_drop"` identifies a preceding local
+maximum when stress subsequently drops by the specified fraction. If the
+criterion is not reached before `max_strain`, the yield fields are `None`. The
+maximum tensile stress and its corresponding strain are reported for the full
+trajectory. Stresses are returned in GPa. OpenMM's
+`MonteCarloAnisotropicBarostat.computeCurrentPressure` is used; this pressure
+contains a kinetic contribution and a finite-difference virial estimate.
 
-Доступные калькуляторы: `MechanicalPropertiesCalculator`,
+Available calculators include `MechanicalPropertiesCalculator`,
 `GlassTransitionCalculator`, `DensityCalculator`, `HeatCapacityCalculator`,
-`GreenKuboThermalConductivityCalculator` и `CTECalculator`
-(`ThermalExpansionCalculator` — синоним объёмного КТР).
+`GreenKuboThermalConductivityCalculator`, and `CTECalculator`
+(`ThermalExpansionCalculator` is an alias for volumetric CTE).
 
-### Газотранспортные свойства мембран
+### Membrane gas-transport properties
 
-Для мембран есть расчёт коэффициента диффузии пенетранта по наклону MSD,
-растворимости методом Widom и проницаемости по модели растворение–диффузия
-`P = D*S`. Каталог `LITERATURE_PENETRANTS` содержит параметры сайтов TraPPE
-для CH₄, CO₂ и N₂ из опубликованных моделей.
+For membranes, the library estimates penetrant diffusion from the MSD slope,
+solubility with Widom insertion, and permeability using the solution–diffusion
+relation `P = D*S`. `LITERATURE_PENETRANTS` contains TraPPE site parameters for
+CH₄, CO₂, and N₂ from published models.
 
-В качестве протокола из литературы добавлен пример triptycene polyimide
-Tanis et al. (2023): 338.5 K, смесь CH₄:N₂ = 2:1 при 65.5 bar, газовая
-диффузионная траектория 15–20 ns. В самой статье для газа использованы
-Vrabec 2CLJQ для N₂ и Yin–MacKerell пятисайтовая модель для CH₄; это не те же
-модели, что параметры TraPPE в каталоге. Чтобы воспроизвести статью, сам
-`Simulation` должен содержать систему с соответствующими параметрами и
-равновесной загрузкой. Для самостоятельного добавления газа есть runner:
+A protocol based on Tanis et al. (2023) for triptycene polyimide is included:
+338.5 K, a 2:1 CH₄:N₂ mixture at 65.5 bar, and a 15–20 ns gas-diffusion
+trajectory. The paper used Vrabec 2CLJQ for N₂ and the five-site Yin–MacKerell
+model for CH₄; these differ from the TraPPE models in the catalog. To reproduce
+the study, the supplied `Simulation` must already contain the matching
+parameters and equilibrated gas loading. A runner is also provided to add gas
+molecules:
 
 ```python
 from polymer_properties_calc import MembraneGasTransportRunner, MembraneGasTransportCalculator
@@ -171,25 +176,24 @@ loaded_simulation = MembraneGasTransportRunner(
 transport = MembraneGasTransportCalculator.from_literature(
     loaded_simulation,
     penetrant="CH4",
-    pressure_bar=1.0,  # внешнее парциальное давление, bar
+    pressure_bar=1.0,  # external partial pressure, bar
 )
 transport.run(loaded_simulation)
 result = transport.analyze()
 print(result.diffusion_coefficient_m2_per_s)
 ```
 
-OpenMM не позволяет добавлять частицы в уже созданный `Context`, поэтому
-`prepare()` возвращает новую `Simulation` с клонированной исходной системой,
-добавленными молекулами и скопированным состоянием исходного расчёта. Число
-молекул задаётся явно: оно не выводится автоматически из давления. После
-вставки нужна релаксация загруженного полимера; её длина зависит от материала.
-Вставка поддерживается для систем с одной стандартной `NonbondedForce` и
-правилом смешивания Лоренца–Бертло. Для OpenMM-силовых полей с пользовательской
-парной функцией автоматическое смешивание пока не поддерживается.
+OpenMM cannot add particles to an existing `Context`. Therefore, `prepare()`
+returns a new `Simulation` with a cloned source system, added molecules, and a
+copy of the source state. The molecule count is explicit and is not inferred
+from pressure. The loaded polymer needs relaxation after insertion; the
+required duration depends on the material. Insertion supports systems with one
+standard `NonbondedForce` and Lorentz–Berthelot mixing. Automatic mixing is not
+supported for custom pair interactions.
 
-Для газов используются готовые модели из литературы. Произвольный органический
-пенетрант можно параметризовать через OpenFF (необязательные зависимости
-`openff-toolkit` и `openff-interchange`):
+The gas models use parameters from the literature. An arbitrary organic
+penetrant can be parameterized with OpenFF (optional `openff-toolkit` and
+`openff-interchange` dependencies):
 
 ```python
 from polymer_properties_calc import PenetrantPreset, MembraneGasTransportRunner
@@ -198,19 +202,19 @@ benzene = PenetrantPreset.from_smiles("benzene", "c1ccccc1")
 loaded_simulation = MembraneGasTransportRunner(benzene, molecule_count=10).prepare(simulation)
 ```
 
-Установить дополнительные пакеты можно командой `pip install '.[openff]'`.
+Install the optional packages with `pip install '.[openff]'`.
 
-OpenFF параметры LJ и заряды переносятся в `NonbondedForce`; внутренние
-гармонические связи, углы и торсионы добавляются к системе. Это предполагает
-совместимые правила смешивания для OpenFF и силового поля полимера. OpenFF
-виртуальные сайты пока не поддерживаются. Сейчас сохраняется одна
-сгенерированная конформация молекулы; Widom результат для гибких молекул будет
-оценкой для этой жёсткой конформации без усреднения по внутренней
-конформационной статистике.
+OpenFF LJ parameters and charges are transferred to `NonbondedForce`; internal
+harmonic bonds, angles, and torsions are added to the system. This assumes
+compatible mixing rules between OpenFF and the polymer force field. OpenFF
+virtual sites are not yet supported. One generated molecular conformation is
+currently retained, so Widom estimates for flexible penetrants correspond to
+that rigid conformation and do not average over internal conformational
+statistics.
 
-Для растворимости Widom runner снимает кадры с MD и вычисляет энергию случайной
-вставки тестовой молекулы в OpenMM, включая настроенный в исходной системе
-метод электростатики:
+For solubility, the Widom runner samples MD frames and computes the energy of
+random test-molecule insertions in OpenMM, including the electrostatics method
+configured in the source system:
 
 ```python
 from polymer_properties_calc import WidomInsertionRunner
@@ -227,31 +231,31 @@ print(solubility.excess_chemical_potential_kj_per_mol)
 print(solubility.solubility_mol_per_m3_pa)
 ```
 
-Литературный профиль Papchenko et al. использует последние 5 ns траектории и
-10⁶ вставок на газ при 298 K; runner распределяет их между выбранными кадрами
-(для 100 кадров это 10 000 вставок на кадр). В другой работе для полимерного
-NBR сходимость исследовали на множестве независимых конфигураций и вплоть до
-10⁸ вставок на кадр, что показывает зависимость нужного объёма выборки от
-полимера и газа. Поэтому следует смотреть сходимость результата по числу
-кадров и вставок, а профиль из статьи считать стартовой настройкой, не
-универсальной гарантией точности. Расчёт даёт бесконечно-разбавленную
-растворимость; для высокой загрузки и набухания нужны итерационные MD–Widom,
-GCMC или осмотический ансамбль.
+The Papchenko et al. literature profile uses the final 5 ns of a trajectory
+and 10⁶ insertions per gas at 298 K. The runner distributes these insertions
+across the selected frames (10,000 insertions per frame for 100 frames). In a
+separate study of polymeric NBR, convergence was examined across many
+independent configurations and up to 10⁸ insertions per frame. This illustrates
+that the required sampling depends on the polymer and gas. Check convergence
+with respect to both the number of frames and insertions; literature settings
+are starting points, not universal guarantees of accuracy. The calculation
+estimates infinite-dilution solubility. High loading and swelling require
+iterative MD–Widom, GCMC, or an osmotic ensemble.
 
-Профиль задаёт длину выборки, а не полное воспроизведение силового поля
-Papchenko et al.: в той работе для полимера и CH₄ использовался PCFF, для CO₂ —
-COMPASS. Текущие газовые константы TraPPE — отдельный набор из литературы;
-для численного воспроизведения статьи нужно передать систему и параметры газа
-из её модели.
+The literature profile specifies a sampling window, not a full reproduction of
+the Papchenko et al. force field: that study used PCFF for the polymer and CH₄,
+and COMPASS for CO₂. The TraPPE gas parameters in this library are a separate
+literature model. To reproduce the paper numerically, provide the system and
+gas parameters from its model.
 
-Для воспроизведения MSD-протокола статьи можно передать соответствующее
-равновесное состояние с газом и использовать `TRIPTYCENE_POLYIMIDE_N2_CH4_2023`;
-его экспериментально заданная длительность диффузии — 15–20 ns. Параметры
-силового поля не подменяются пресетом автоматически.
+To follow the MSD protocol from the triptycene polyimide paper, provide the
+corresponding equilibrated state with gas molecules and use
+`TRIPTYCENE_POLYIMIDE_N2_CH4_2023`; its reported gas-diffusion trajectory is
+15–20 ns. The preset does not replace the force-field parameters.
 
-Для стеклообразного полимера одной точки по давлению недостаточно для полной
-изотермы сорбции. Если рассчитаны концентрации при нескольких давлениях,
-можно подогнать dual-mode модель:
+A single pressure point is not enough to determine a full sorption isotherm
+for a glassy polymer. Given concentrations at multiple pressures, fit a
+dual-mode model:
 
 ```python
 from polymer_properties_calc import fit_dual_mode_sorption
@@ -263,27 +267,28 @@ fit = fit_dual_mode_sorption(
 print(fit.k_d_mol_m3_bar, fit.c_h_mol_m3, fit.b_per_bar)
 ```
 
-Для существующего загруженного бокса `MembraneGasTransportCalculator` может
-по-прежнему оценивать секущую растворимость как `C/p` при заданном внешнем
-давлении. Widom runner оценивает коэффициент Генри в бесконечно-разбавленном
-пределе. Проницаемость вычисляется как `D*S` и выдаётся в Barrer.
+For an already gas-loaded box, `MembraneGasTransportCalculator` can still
+estimate the secant solubility `C/p` at a given external pressure. The Widom
+runner estimates the Henry coefficient in the infinite-dilution limit.
+Permeability is calculated as `D*S` and returned in Barrer.
 
-Калькуляторы плотности, Tg и КТР ожидают периодическую систему с уже
-настроенным `MonteCarloBarostat` или `MonteCarloAnisotropicBarostat`.
-Механический калькулятор заменяет существующий изотропный/анизотропный
-баростат на анизотропный. Если `relax_transverse_axes=True`, он поддерживает
-заданное давление на двух поперечных осях; ось растяжения фиксирована. Если
-параметр выключен, баростат используется только как измеритель давления и
-не меняет размеры ячейки. Температура берётся из интегратора или существующего
-баростата; при невозможности определить её можно передать явно.
+Density, Tg, and CTE calculators expect a periodic system with an existing
+`MonteCarloBarostat` or `MonteCarloAnisotropicBarostat`. The mechanical
+calculator replaces the existing isotropic or anisotropic barostat with an
+anisotropic one. With `relax_transverse_axes=True`, it maintains the requested
+pressure along the two transverse axes while fixing the stretch axis. If this
+option is disabled, the barostat measures pressure without changing box
+lengths. Temperature is read from the integrator or existing barostat; pass it
+explicitly if it cannot be determined.
 
-### Геометрия пор и PSD через Zeo++
+### Pore geometry and PSD with Zeo++
 
-`PorePropertiesCalculator` запускает внешний исполняемый файл Zeo++ `network`
-для периодически снимаемых кадров OpenMM. Для каждого кадра строится CIF
-полной ячейки P1, затем Zeo++ рассчитывает крупнейшую включённую сферу (LCD),
-крупнейшую свободную сферу (PLD), включённую сферу вдоль свободного пути
-(Dif), канальную размерность, доступные поверхность/объём и PSD.
+`PorePropertiesCalculator` calls the external Zeo++ `network` executable for
+periodically sampled OpenMM frames. It writes a P1 CIF for each complete unit
+cell, then calculates the largest included sphere (LCD), largest free sphere
+(PLD), largest included sphere along the free-sphere path (Dif), channel
+dimensionality, accessible surface area and volume, and pore-size distribution
+(PSD).
 
 ```python
 from polymer_properties_calc import PorePropertiesCalculator
@@ -304,20 +309,21 @@ print(result.accessible_volume_fraction)
 print(result.pore_diameter_bins_angstrom, result.pore_size_distribution)
 ```
 
-В Zeo++ PLD соответствует крупнейшей сферической пробе, проходящей по
-периодическому каналу; LCD — крупнейшей сфере внутри полости. PSD — гистограмма
-распределения локальных диаметров пор; по умолчанию возвращается производная
-гистограмма Zeo++ (`Derivative_dist`), а `raw_data` хранит массивы по кадрам.
-Для анализа объёма/поверхности по умолчанию проба имеет нулевой радиус; задайте
-радиус молекулы, например 1.86 Å для центра N₂, если нужна доступность для
-конкретной пробы. Радиус канала и радиус измерительной пробы передаются
-одинаковыми, как рекомендуется в документации Zeo++. Увеличение
-`monte_carlo_samples` повышает статистическую точность и время расчёта.
+In Zeo++, PLD is the largest spherical probe that can pass through a
+periodic channel; LCD is the largest sphere that fits inside a cavity. PSD is a
+histogram of local pore diameters. By default, the calculator returns Zeo++'s
+derivative distribution (`Derivative_dist`), and `raw_data` stores values for
+each frame. The default probe radius is zero for geometric void analysis. Set a
+molecular probe radius, for example 1.86 Å for the N₂ probe, when measuring
+accessibility to a specific probe. Zeo++ receives the same radius for channel
+accessibility and the measurement probe, as its documentation recommends.
+Increasing `monte_carlo_samples` improves sampling statistics at the cost of
+runtime.
 
-Zeo++ устанавливается отдельно от этого Python-пакета. Он использует
-элементные радиусы CCDC по умолчанию, а `-ha` включает высокоточную схему
-Voronoi; для полимеров с пользовательскими радиусами атомов перед запуском
-следует настроить радиусы Zeo++ для используемой модели. Это геометрический
-анализ мгновенных конфигураций: результаты зависят от кадров, размера ячейки,
-радиусов атомов и выбранной пробы, и сами по себе не являются оценкой
-экспериментальной сорбционной пористости.
+Zeo++ is installed separately from this Python package. It uses CCDC elemental
+radii by default, and `-ha` enables its high-accuracy Voronoi scheme. For
+polymers that require custom atomic radii, configure the Zeo++ radii for the
+model before running. This is a geometric analysis of instantaneous
+configurations: results depend on sampled frames, cell size, atomic radii, and
+probe choice, and are not by themselves estimates of experimental sorption
+porosity.
